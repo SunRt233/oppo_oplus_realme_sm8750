@@ -1,0 +1,125 @@
+--- a/kernel/module/main.c
++++ b/kernel/module/main.c
+@@ -44,6 +44,10 @@
+ #include <asm/mmu_context.h>
+ #include <linux/license.h>
+ #include <asm/sections.h>
++#if IS_ENABLED(CONFIG_ARM64)
++#include <asm/patching.h>
++#include <linux/threads.h>
++#endif
+ #include <linux/tracepoint.h>
+ #include <linux/ftrace.h>
+ #include <linux/livepatch.h>
+@@ -2802,6 +2806,90 @@
+ 	return err;
+ }
+ 
++#if IS_ENABLED(CONFIG_ARM64) && IS_ENABLED(CONFIG_KALLSYMS)
++/*
++ * oplus_bsp_sched_assist 的 update_ddl_hit_history() 用 p->pid 直接索引
++ * ddl_sdata[PID_MAX_DEFAULT]，没有边界检查。pid_max 一旦被抬高（例如容器里
++ * 的 systemd 写 kernel.pid_max=4194304），pid >= 32768 就会越界写；本内核
++ * CONFIG_UBSAN_TRAP=y，越界直接 panic。
++ *
++ * 该模块是 vendor 预编译产物：既没有同源源码，重编又会撞 Module.symvers 的
++ * CRC 校验，所以改为在模块加载时把函数入口 16 字节改成跳转，指向下面这份
++ * 带边界检查的替身。
++ *
++ * 时机：此刻重定位已完成、kallsyms 已填充（post_relocation），但 mod->init
++ * 尚未执行、vendor hook 尚未注册，没有任何 CPU 能执行该函数，因此用
++ * _nosync 版本即可，无需 stop_machine()。
++ */
++struct ddl_sinfo_data_6_6 {
++	char	comm[TASK_COMM_LEN];
++	u64	hit;
++};
++
++static struct ddl_sinfo_data_6_6 *nv_ddl_sdata;
++
++static void nv_update_ddl_hit_history(struct task_struct *p)
++{
++	struct ddl_sinfo_data_6_6 *entry;
++
++	if (!p || !nv_ddl_sdata || p->pid <= 0 || p->pid >= PID_MAX_DEFAULT)
++		return;
++
++	entry = &nv_ddl_sdata[p->pid];
++	if (!entry->comm[0] ||
++	    strncmp(p->comm, entry->comm, strlen(p->comm))) {
++		memset(entry, 0, sizeof(*entry));
++		strscpy(entry->comm, p->comm, TASK_COMM_LEN);
++	}
++	entry->hit++;
++}
++
++static int nv_patch_jump(unsigned long from, unsigned long to)
++{
++	/* ldr x16, [pc, #8] ; br x16 ; .quad to */
++	u32 insns[] = { 0x58000050, 0xD61F0200,
++			lower_32_bits(to), upper_32_bits(to) };
++	int i, err;
++
++	for (i = 0; i < ARRAY_SIZE(insns); i++) {
++		err = aarch64_insn_patch_text_nosync((void *)(from + i * 4),
++						     insns[i]);
++		if (err)
++			return err;
++	}
++	return 0;
++}
++
++static void nv_hook_sched_assist(struct module *mod)
++{
++	unsigned long from;
++	int err;
++
++	if (strcmp(mod->name, "oplus_bsp_sched_assist"))
++		return;
++
++	nv_ddl_sdata = (void *)find_kallsyms_symbol_value(mod, "ddl_sdata");
++	from = find_kallsyms_symbol_value(mod, "update_ddl_hit_history");
++	if (!nv_ddl_sdata || !from) {
++		nv_ddl_sdata = NULL;
++		pr_err("ddl_hit_hook: symbols not found\n");
++		return;
++	}
++
++	err = nv_patch_jump(from, (unsigned long)nv_update_ddl_hit_history);
++	if (err) {
++		nv_ddl_sdata = NULL;
++		pr_err("ddl_hit_hook: text patch failed (%d)\n", err);
++		return;
++	}
++
++	pr_info("ddl_hit_hook: update_ddl_hit_history patched -> %ps\n",
++		nv_update_ddl_hit_history);
++}
++#else
++static void nv_hook_sched_assist(struct module *mod) { }
++#endif
++
+ static int prepare_coming_module(struct module *mod)
+ {
+ 	int err;
+@@ -2811,6 +2899,8 @@
+ 	if (err)
+ 		return err;
+ 
++	nv_hook_sched_assist(mod);
++
+ 	err = blocking_notifier_call_chain_robust(&module_notify_list,
+ 			MODULE_STATE_COMING, MODULE_STATE_GOING, mod);
+ 	err = notifier_to_errno(err);
+--- a/kernel/module/internal.h
++++ b/kernel/module/internal.h
+@@ -47,6 +47,9 @@
+ extern struct mutex module_mutex;
+ extern struct list_head modules;
+ 
++/* kernel/module/kallsyms.c */
++unsigned long find_kallsyms_symbol_value(struct module *mod, const char *name);
++
+ extern struct module_attribute *modinfo_attrs[];
+ extern size_t modinfo_attrs_count;
+ 

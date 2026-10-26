@@ -475,6 +475,10 @@ jobs:
             # 修补 oplus_bsp_midas 行为，避免开机崩溃
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/fix_oplus_bsp_midas.patch
             patch -p1 -F 3 < fix_oplus_bsp_midas.patch || true
+            # 修补 oplus_bsp_sched_assist: ddl_sdata[p->pid] 越界（pid >= 32768 即 UBSAN panic）
+            wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ddl_hit_hook_6.6.patch
+            patch -p1 -F 3 < ddl_hit_hook_6.6.patch || exit 1
+            grep -q 'nv_hook_sched_assist' kernel/module/main.c || { echo 'ddl_hit_hook 未应用!'; exit 1; }
             # 应用 NTSync 补丁
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_base.patch
             wget https://github.com/$GITHUB_REPOSITORY/raw/refs/heads/$GITHUB_REF_NAME/droidspaces_patch/ntsync_compat_${{ env.ANDROID_VERSION }}-${{ env.KERNEL_VERSION }}.patch
