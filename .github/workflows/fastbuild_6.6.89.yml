@@ -495,9 +495,18 @@ jobs:
             echo "CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_TARGET_LOG=y" >> ./arch/arm64/configs/gki_defconfig
             echo "CONFIG_NETFILTER_XT_MATCH_RECENT=y" >> ./arch/arm64/configs/gki_defconfig
-            # 未经测试的配置选项，可能导致bug
-            #echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
-            #echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
+            # 容器运行时的 cgroup 控制器
+            # CGROUP_PIDS: podman 用 cgroupfs 时无条件写 pids.max，缺它则启动失败
+            #              （pids_limit=-1 也拦不住）；另可用于 --pids-limit 防 fork 炸弹
+            # CGROUP_DEVICE: docker 的 --device 白名单
+            # 两者均为 bool 无依赖，不在 Kconfig.gki 保护列表，Android 的 cgroups.json
+            # 也未占用（v1 只绑 blkio/cpu/cpuset/memory），故编入后会出现在 cgroup v2
+            echo "CONFIG_CGROUP_PIDS=y" >> ./arch/arm64/configs/gki_defconfig
+            echo "CONFIG_CGROUP_DEVICE=y" >> ./arch/arm64/configs/gki_defconfig
+            for k in CGROUP_PIDS CGROUP_DEVICE; do
+              grep -q "^CONFIG_$k=y" ./arch/arm64/configs/gki_defconfig || { echo "!! CONFIG_$k 未写入"; exit 1; }
+            done
+            # 其余未验证项保持注释
             #echo "CONFIG_FW_LOADER_COMPRESS=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_BRIDGE_NETFILTER=y" >> ./arch/arm64/configs/gki_defconfig
             #echo "CONFIG_NF_TABLES=y" >> ./arch/arm64/configs/gki_defconfig
